@@ -477,7 +477,7 @@ class SeismicDataDownloader:
 
                             self.merge_daily_segments(
                                 day_folder=day_folder,
-                                pattern="*.seg*.sac",
+                                pattern=pattern,
                                 merge_folder="merged_raw",
                                 fill_value=0,
                                 merge_method="fill_value"
@@ -535,7 +535,9 @@ class SeismicDataDownloader:
 
     def remove_response_for_data(self, starttime: Union[str, UTCDateTime],
                                  endtime: Union[str, UTCDateTime],
-                                 processed_suffix: str = "_rmresp") -> None:
+                                 processed_suffix: str = "_rmresp",
+                                 output: str = None,
+                                 use_merged: bool = False) -> None:
         """
         为指定时间范围内的数据去除仪器响应
         修改后可处理同一天内的多个数据段
@@ -545,6 +547,7 @@ class SeismicDataDownloader:
             endtime: 结束时间
             processed_suffix: 处理后文件的后缀
             output: 输出类型，可选 'VEL'(速度)、'DISP'(位移)或 'ACC'(加速度)，默认使用配置中的值
+            use_merged: 是否优先使用合并后的数据
         """
         if isinstance(starttime, str):
             starttime = UTCDateTime(starttime)
@@ -565,23 +568,35 @@ class SeismicDataDownloader:
             processed_folder = day_folder / "processed"
             processed_folder.mkdir(exist_ok=True)
 
-            # 首先尝试从merged_raw文件夹中获取合并后的数据
-            merged_folder = day_folder / "merged_raw"
-            if merged_folder.exists() and self.config.merge_after_download:
-                raw_files = list(merged_folder.glob(
-                    f"{self.config.network}.*.merged.sac"))
-                self.logger.info(
-                    f"从合并文件夹 {merged_folder} 中找到 {len(raw_files)} 个文件")
-            else:
-                # 修改文件匹配模式，支持带有段号(seg*)的文件
-                raw_files = list(day_folder.glob(
+            # 根据use_merged参数决定是否优先查找合并后的数据
+            raw_files = []
+            if use_merged:
+                # 首先尝试从merged_raw文件夹中获取合并后的数据
+                merged_folder = day_folder / "merged_raw"
+                if merged_folder.exists():
+                    raw_files = list(merged_folder.glob(
+                        f"{self.config.network}.*.merged.sac"))
+                    if raw_files:
+                        self.logger.info(
+                            f"从合并文件夹 {merged_folder} 中找到 {len(raw_files)} 个文件")
+                    else:
+                        self.logger.warning(
+                            f"在合并文件夹 {merged_folder} 中未找到匹配的文件，将尝试使用原始文件")
+
+            # 如果没有找到合并文件或不使用合并文件，则查找原始文件
+            if not raw_files:
+                # 尝试不同的文件匹配模式以找到原始数据
+                seg_files = list(day_folder.glob(
                     f"{self.config.network}.*.seg*.sac"))
-                if not raw_files:
-                    # 兼容旧文件命名方式
-                    raw_files = list(day_folder.glob(
-                        f"{self.config.network}.*.sac"))
-                self.logger.info(
-                    f"从原始文件夹 {day_folder} 中找到 {len(raw_files)} 个文件")
+                regular_files = list(day_folder.glob(
+                    f"{self.config.network}.*.sac"))
+
+                if seg_files:
+                    raw_files = seg_files
+                    self.logger.info(f"找到 {len(raw_files)} 个带有段标记的文件")
+                else:
+                    raw_files = regular_files
+                    self.logger.info(f"找到 {len(raw_files)} 个标准SAC文件")
 
             response_file = list(response_folder.glob(
                 f"{self.config.network}_{day_str}_response.xml"))
@@ -604,7 +619,7 @@ class SeismicDataDownloader:
                 station_part = '.'.join(
                     file_parts[:-1]) if len(file_parts) > 1 else file_parts[0]
 
-                # 检查是否有段号
+                # 检查是否有段号或合并标记
                 segment_part = ""
                 if "seg" in raw_file.stem:
                     # 提取段号部分
@@ -612,18 +627,22 @@ class SeismicDataDownloader:
                         if part.startswith("seg"):
                             segment_part = f".{part}"
                             break
+                elif "merged" in raw_file.stem:
+                    segment_part = ".merged"
 
-                # 构建新的文件名
+                # 构建新的文件名，包含输出类型信息
                 processed_file = processed_folder / \
-                    f"{station_part}{segment_part}{processed_suffix}.sac"
+                    f"{station_part}{segment_part}{processed_suffix}_{output.lower()}.sac"
 
                 for retry in range(self.config.max_retries):
                     try:
                         st = read(str(raw_file))
-                        st.remove_response(inventory=inventory)
+                        # 使用指定的输出类型去除仪器响应
+                        self.logger.info(f"去除仪器响应，输出类型: {output}")
+                        st.remove_response(inventory=inventory, output=output)
                         st.write(str(processed_file), format="SAC")
                         self.logger.info(
-                            f"成功处理文件: {raw_file.name} -> {processed_file.name}")
+                            f"成功处理文件: {raw_file.name} -> {processed_file.name} (输出类型: {output})")
                         break
                     except Exception as e:
                         self.logger.error(
@@ -635,6 +654,7 @@ class SeismicDataDownloader:
 
                         self.logger.error(f"达到最大重试次数，放弃处理文件 {raw_file.name}")
 
+        # 使用单线程或多线程执行
         if self.config.single_thread:
             for day in days:
                 process_single_day(day)
@@ -858,7 +878,8 @@ class SeismicDataDownloader:
                      endtime: Union[str, UTCDateTime],
                      operations: Dict[str, bool] = None,
                      input_suffix: str = "",
-                     output_suffix: str = "_processed") -> None:
+                     output_suffix: str = "_processed",
+                     use_merged: bool = False) -> None:
         """
         处理指定时间范围内的数据
         修改后可处理同一天内的多个数据段
@@ -874,6 +895,7 @@ class SeismicDataDownloader:
                        - bandpass: 带通滤波
             input_suffix: 输入文件后缀
             output_suffix: 输出文件后缀
+            use_merged: 是否优先使用合并后的数据
         """
         # 默认执行所有操作
         if operations is None:
@@ -903,28 +925,56 @@ class SeismicDataDownloader:
             processed_folder = day_folder / "processed"
             processed_folder.mkdir(exist_ok=True)
 
-            # 查找输入文件，支持带有段号(seg*)的文件
-            if input_suffix:
-                # 查找带有特定后缀和段号的文件
-                input_pattern = f"*{input_suffix}.seg*.sac"
-                input_files = list(day_folder.glob(input_pattern))
-                if not input_files:
-                    # 尝试在processed文件夹中查找
-                    input_files = list(processed_folder.glob(input_pattern))
-                if not input_files:
-                    # 兼容旧的文件命名方式
-                    input_pattern = f"*{input_suffix}.sac"
+            # 检查是否使用合并后的数据
+            if use_merged:
+                # 尝试从合并文件夹中获取数据
+                merged_folder = day_folder / "merged_raw"
+                if merged_folder.exists():
+                    if input_suffix:
+                        # 带有后缀的合并文件
+                        input_pattern = f"*{input_suffix}.merged.sac"
+                    else:
+                        # 无后缀的合并文件
+                        input_pattern = f"{self.config.network}.*.merged.sac"
+
+                    input_files = list(merged_folder.glob(input_pattern))
+
+                    if input_files:
+                        self.logger.info(f"从合并文件夹中找到 {len(input_files)} 个文件")
+                    else:
+                        self.logger.warning(
+                            f"在合并文件夹中未找到匹配的文件: {input_pattern}")
+                        # 回退到使用未合并的数据
+                        use_merged = False
+                else:
+                    self.logger.warning(f"合并文件夹不存在: {merged_folder}")
+                    use_merged = False
+
+            # 如果不使用合并数据或未找到合并数据
+            if not use_merged:
+                # 查找输入文件，支持带有段号(seg*)的文件
+                if input_suffix:
+                    # 查找带有特定后缀和段号的文件
+                    input_pattern = f"*{input_suffix}.seg*.sac"
                     input_files = list(day_folder.glob(input_pattern))
                     if not input_files:
+                        # 尝试在processed文件夹中查找
                         input_files = list(
                             processed_folder.glob(input_pattern))
-            else:
-                # 无后缀时的查找模式
-                input_pattern = f"{self.config.network}.*.seg*.sac"
-                input_files = list(day_folder.glob(input_pattern))
-                if not input_files:
-                    input_pattern = f"{self.config.network}.*.sac"
+                    if not input_files:
+                        # 兼容旧的文件命名方式
+                        input_pattern = f"*{input_suffix}.sac"
+                        input_files = list(day_folder.glob(input_pattern))
+                        if not input_files:
+                            input_files = list(
+                                processed_folder.glob(input_pattern))
+                else:
+                    # 无后缀时的查找模式
+                    input_pattern = f"{self.config.network}.*.seg*.sac"
                     input_files = list(day_folder.glob(input_pattern))
+                    if not input_files:
+                        input_pattern = f"{self.config.network}.*.sac"
+                        input_files = list(day_folder.glob(input_pattern))
 
             if not input_files:
                 self.logger.warning(
@@ -1040,25 +1090,60 @@ class SeismicDataDownloader:
 
         # 1. 去除仪器响应（如果需要）
         if remove_response:
-            self.remove_response_for_data(
-                starttime=starttime,
-                endtime=endtime,
-                processed_suffix="_rmresp"
-            )
-            input_suffix = "_rmresp"
+            # 需要去除仪器响应
+            output_type = response_output if response_output else self.config.response_output
+            self.logger.info(f"去除仪器响应，输出类型: {output_type}")
+
+            # 构建后缀，包含输出类型信息
+            processed_suffix = f"_rmresp_{output_type.lower()}"
+
+            # 如果有合并数据且配置为使用合并数据，则从合并数据中去除响应
+            if raw_merged_exists and self.config.merge_after_download:
+                self.logger.info("从合并后的原始数据中去除仪器响应")
+
+                self.remove_response_for_data(
+                    starttime=starttime,
+                    endtime=endtime,
+                    processed_suffix=processed_suffix,
+                    output=output_type,
+                    use_merged=True
+                )
+            else:
+                # 从原始分段数据中去除响应
+                self.logger.info("从原始分段数据中去除仪器响应")
+                self.remove_response_for_data(
+                    starttime=starttime,
+                    endtime=endtime,
+                    processed_suffix=processed_suffix,
+                    output=output_type,
+                    use_merged=False
+                )
+
+            input_suffix = processed_suffix
+            use_merged = False  # 这里设为False是因为已经处理过了，下一步将使用去除响应后的数据
         else:
             input_suffix = ""
+            # 不需要去除仪器响应
+            if raw_merged_exists and self.config.merge_after_download:
+                # 有合并数据且配置为使用合并数据
+                self.logger.info("使用下载后立即合并的数据进行处理（不去除响应）")
+                use_merged = True
+            else:
+                # 使用原始分段数据
+                self.logger.info("使用原始分段数据进行处理（不去除响应，不合并）")
+                use_merged = False
 
         # 2. 执行数据预处理
         self.process_data(
             starttime=starttime,
             endtime=endtime,
             input_suffix=input_suffix,
-            output_suffix="_processed"
+            output_suffix="_processed",
+            use_merged=use_merged
         )
 
         # 合并数据部分
-        # 如果原始数据已合并且用户要求合并数据段，则在处理中使用合并数据而不是再次合并
+        # 如果原始数据已合并且用户要求合并数据段，则禁用后续合并
         if raw_merged_exists and merge_segments:
             # 设置处理时使用合并数据
             use_merged = True
@@ -1067,7 +1152,7 @@ class SeismicDataDownloader:
             merge_segments = False
             self.logger.info("已使用合并后的原始数据，跳过最终合并步骤")
 
-         # 3. 合并数据段（如果需要）
+        # 3. 合并数据段（如果需要）
         if merge_segments:
             self.logger.info("开始合并数据段")
             merged_count = 0
