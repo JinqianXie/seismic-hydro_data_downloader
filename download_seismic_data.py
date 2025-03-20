@@ -123,7 +123,8 @@ class DownloadConfig:
     single_thread: bool = False
     need_station_coords: bool = False  # 添加标志，控制是否需要处理台站位置信息
     merge_after_download: bool = False  # 下载后立即合并数据段
-    response_output: str = 'VEL'  # 去除仪器响应后输出的类型: 'VEL'(速度), 'DISP'(位移), 'ACC'(加速度)
+    # 去除仪器响应后输出的类型: 'VEL'(速度), 'DISP'(位移), 'ACC'(加速度)
+    response_output: str = 'VEL'
 
 
 @dataclass
@@ -436,10 +437,10 @@ class SeismicDataDownloader:
                     # 先检查文件夹中是否存在文件及其类型
                     seg_files = list(day_folder.glob("*.seg*.sac"))
                     regular_files = list(day_folder.glob("*.sac"))
-                    
+
                     # 优先使用带seg标记的文件，如果没有就使用普通sac文件
                     pattern = "*.seg*.sac" if seg_files else "*.sac"
-                    
+
                     self.merge_daily_segments(
                         day_folder=day_folder,
                         pattern="*.seg*.sac",
@@ -470,10 +471,10 @@ class SeismicDataDownloader:
                             # 先检查文件夹中是否存在文件及其类型
                             seg_files = list(day_folder.glob("*.seg*.sac"))
                             regular_files = list(day_folder.glob("*.sac"))
-                            
+
                             # 优先使用带seg标记的文件，如果没有就使用普通sac文件
                             pattern = "*.seg*.sac" if seg_files else "*.sac"
-                            
+
                             self.merge_daily_segments(
                                 day_folder=day_folder,
                                 pattern="*.seg*.sac",
@@ -567,8 +568,10 @@ class SeismicDataDownloader:
             # 首先尝试从merged_raw文件夹中获取合并后的数据
             merged_folder = day_folder / "merged_raw"
             if merged_folder.exists() and self.config.merge_after_download:
-                raw_files = list(merged_folder.glob(f"{self.config.network}.*.merged.sac"))
-                self.logger.info(f"从合并文件夹 {merged_folder} 中找到 {len(raw_files)} 个文件")
+                raw_files = list(merged_folder.glob(
+                    f"{self.config.network}.*.merged.sac"))
+                self.logger.info(
+                    f"从合并文件夹 {merged_folder} 中找到 {len(raw_files)} 个文件")
             else:
                 # 修改文件匹配模式，支持带有段号(seg*)的文件
                 raw_files = list(day_folder.glob(
@@ -577,7 +580,8 @@ class SeismicDataDownloader:
                     # 兼容旧文件命名方式
                     raw_files = list(day_folder.glob(
                         f"{self.config.network}.*.sac"))
-                self.logger.info(f"从原始文件夹 {day_folder} 中找到 {len(raw_files)} 个文件")
+                self.logger.info(
+                    f"从原始文件夹 {day_folder} 中找到 {len(raw_files)} 个文件")
 
             response_file = list(response_folder.glob(
                 f"{self.config.network}_{day_str}_response.xml"))
@@ -685,18 +689,19 @@ class SeismicDataDownloader:
                 # 尝试更宽松的匹配
                 self.logger.info("尝试使用更宽松的匹配模式: *.sac")
                 all_files = list(day_folder.glob("*.sac"))
-                
+
             if all_files:
                 self.logger.info(f"使用宽松匹配找到 {len(all_files)} 个文件")
             else:
                 # 检查目录中是否有任何文件
                 all_possible_files = list(day_folder.glob("*"))
                 if all_possible_files:
-                    self.logger.info(f"目录中有 {len(all_possible_files)} 个文件，但没有匹配的SAC文件。示例: {all_possible_files[:3]}")
+                    self.logger.info(
+                        f"目录中有 {len(all_possible_files)} 个文件，但没有匹配的SAC文件。示例: {all_possible_files[:3]}")
                 else:
                     self.logger.warning(f"目录 {str(day_folder)} 中没有任何文件")
                 return
-        
+
         self.logger.info(f"找到 {len(all_files)} 个匹配的文件")
 
         # 按照网络、台站和通道进行分组
@@ -705,9 +710,9 @@ class SeismicDataDownloader:
             # 提取基本标识信息（网络.台站.通道.日期）
             file_name = file_path.name
             parts = file_name.split('.')
-            
+
             self.logger.debug(f"处理文件: {file_name}, 部分: {parts}")
-        
+
             # 尝试提取网络、台站、通道信息，更灵活地处理不同的文件命名格式
             network = None
             station = None
@@ -729,33 +734,34 @@ class SeismicDataDownloader:
                 # 无法识别的格式，使用整个文件名作为组键
                 self.logger.warning(f"无法解析文件名: {file_name}, 将整个文件名作为组键")
                 group_key = file_name.replace(".sac", "")
-                
+
                 if group_key not in file_groups:
                     file_groups[group_key] = []
-                
+
                 file_groups[group_key].append(file_path)
                 continue
-        
+
             # 用于分组的键
             group_key = f"{network}.{station}.{channel}"
             if date_part != "unknown":
                 group_key += f".{date_part}"
-            
+
             self.logger.debug(f"文件 {file_name} 分配到组: {group_key}")
-            
+
             if group_key not in file_groups:
                 file_groups[group_key] = []
-            
+
             file_groups[group_key].append(file_path)
-    
+
         self.logger.info(f"文件分为 {len(file_groups)} 个组")
 
         # 对每个组进行处理
         for group_key, file_paths in file_groups.items():
             try:
                 if len(file_paths) <= 1:
-                    self.logger.info(f"组 {group_key} 只有 {len(file_paths)} 个文件，跳过合并")
-                    
+                    self.logger.info(
+                        f"组 {group_key} 只有 {len(file_paths)} 个文件，跳过合并")
+
                     # 如果只有一个文件，可以选择直接复制到合并文件夹
                     if len(file_paths) == 1:
                         output_file = merged_folder / f"{group_key}.merged.sac"
@@ -767,11 +773,11 @@ class SeismicDataDownloader:
                             self.logger.info(f"单一文件已复制到 {output_file}")
                         except Exception as e:
                             self.logger.error(f"复制单一文件时出错: {e}")
-                    
+
                     continue
-                
+
                 self.logger.info(f"正在合并组 {group_key} 的 {len(file_paths)} 个数据段")
-                
+
                 # 读取所有段的数据
                 stream = Stream()
                 for file_path in file_paths:
@@ -781,64 +787,69 @@ class SeismicDataDownloader:
                         self.logger.debug(f"读取数据段: {file_path.name}")
                     except Exception as e:
                         self.logger.error(f"读取文件 {file_path} 时出错: {e}")
-                
+
                 if len(stream) == 0:
                     self.logger.warning(f"组 {group_key} 没有成功读取任何数据")
                     continue
-                
+
                 # 按通道分组并合并
                 merged_stream = Stream()
                 channel_ids = set(tr.id for tr in stream)
-                
-                self.logger.info(f"组 {group_key} 包含 {len(channel_ids)} 个不同的通道ID: {channel_ids}")
-                
+
+                self.logger.info(
+                    f"组 {group_key} 包含 {len(channel_ids)} 个不同的通道ID: {channel_ids}")
+
                 for channel_id in channel_ids:
                     channel_traces = stream.select(id=channel_id)
-                    
+
                     # 合并前对数据进行排序
                     channel_traces.sort(keys=['starttime'])
-                    
+
                     if len(channel_traces) > 1:
-                        self.logger.info(f"通道 {channel_id} 有 {len(channel_traces)} 个片段需要合并")
-                        
+                        self.logger.info(
+                            f"通道 {channel_id} 有 {len(channel_traces)} 个片段需要合并")
+
                         # 输出时间范围信息，用于调试
                         for i, tr in enumerate(channel_traces):
-                            self.logger.debug(f"片段 {i}: 开始={tr.stats.starttime}, 结束={tr.stats.endtime}, 持续={tr.stats.endtime - tr.stats.starttime}秒")
-                        
+                            self.logger.debug(
+                                f"片段 {i}: 开始={tr.stats.starttime}, 结束={tr.stats.endtime}, 持续={tr.stats.endtime - tr.stats.starttime}秒")
+
                         # 合并设置
                         try:
                             if merge_method == "interpolate":
-                                merged_channel = channel_traces.merge(method=1, fill_value=None, 
-                                                                    interpolation_samples=-1)
+                                merged_channel = channel_traces.merge(method=1, fill_value=None,
+                                                                      interpolation_samples=-1)
                             else:  # 默认使用fill_value
-                                merged_channel = channel_traces.merge(method=1, fill_value=fill_value)
-                            
+                                merged_channel = channel_traces.merge(
+                                    method=1, fill_value=fill_value)
+
                             merged_stream += merged_channel
-                            
+
                             # 输出合并后的信息
                             for tr in merged_channel:
-                                self.logger.info(f"合并后: 开始={tr.stats.starttime}, 结束={tr.stats.endtime}, 持续={tr.stats.endtime - tr.stats.starttime}秒")
-                        
+                                self.logger.info(
+                                    f"合并后: 开始={tr.stats.starttime}, 结束={tr.stats.endtime}, 持续={tr.stats.endtime - tr.stats.starttime}秒")
+
                         except Exception as e:
                             self.logger.error(f"合并通道 {channel_id} 时出错: {e}")
                     else:
                         # 只有一个片段，直接添加
                         self.logger.info(f"通道 {channel_id} 只有一个片段，无需合并")
                         merged_stream += channel_traces
-                
+
                 if len(merged_stream) == 0:
                     self.logger.warning(f"组 {group_key} 没有成功合并任何数据")
                     continue
-                
+
                 # 保存合并后的数据
                 output_file = merged_folder / f"{group_key}.merged.sac"
-                
+
                 try:
                     merged_stream.write(str(output_file), format="SAC")
                     self.logger.info(f"成功合并并保存: {output_file}")
                 except Exception as e:
                     self.logger.error(f"保存合并数据到 {output_file} 时出错: {e}")
-                
+
             except Exception as e:
                 self.logger.error(f"合并组 {group_key} 时出错: {e}")
 
@@ -990,7 +1001,7 @@ class SeismicDataDownloader:
                          merge_segments: bool = False,
                          merge_method: str = "fill_value",
                          fill_value: float = 0,
-                        response_output: str = None) -> None:
+                         response_output: str = None) -> None:
         """
         完整的数据处理流程
 
@@ -1020,7 +1031,7 @@ class SeismicDataDownloader:
             day = days[0]
             day_str = day.strftime("%Y-%m-%d")
             merged_raw_folder = self.save_path / day_str / "merged_raw"
-            
+
             if merged_raw_folder.exists():
                 merged_files = list(merged_raw_folder.glob("*.merged.sac"))
                 if merged_files:
@@ -1051,7 +1062,7 @@ class SeismicDataDownloader:
         if raw_merged_exists and merge_segments:
             # 设置处理时使用合并数据
             use_merged = True
-            
+
             # 禁用最后的merge_segments步骤，因为我们已经使用了合并的输入
             merge_segments = False
             self.logger.info("已使用合并后的原始数据，跳过最终合并步骤")
@@ -1060,24 +1071,24 @@ class SeismicDataDownloader:
         if merge_segments:
             self.logger.info("开始合并数据段")
             merged_count = 0
-            
+
             for day in days:
                 day_str = day.strftime("%Y-%m-%d")
-                
+
                 # 首先检查处理文件夹是否存在
                 processed_folder = self.save_path / day_str / "processed"
                 if not processed_folder.exists():
                     self.logger.warning(f"处理文件夹不存在: {str(processed_folder)}")
-                    
+
                     # 检查日期文件夹是否存在
                     day_folder = self.save_path / day_str
                     if not day_folder.exists():
                         self.logger.warning(f"日期文件夹不存在: {str(day_folder)}")
                         continue
-                    
+
                     # 如果处理文件夹不存在，尝试在日期文件夹中查找
                     self.logger.info(f"尝试在日期文件夹中查找数据: {str(day_folder)}")
-                    
+
                     # 构建匹配模式
                     if input_suffix and "_processed" in input_suffix:
                         # 已经包含了处理后缀
@@ -1091,21 +1102,23 @@ class SeismicDataDownloader:
                         # 无输入后缀，只有处理后缀
                         pattern = f"*_processed.seg*.sac"
                         alt_pattern = f"*_processed.sac"
-                    
+
                     # 尝试在日期文件夹中合并
                     try:
-                        self.logger.info(f"在 {str(day_folder)} 中使用模式 {pattern} 或 {alt_pattern}")
-                        
+                        self.logger.info(
+                            f"在 {str(day_folder)} 中使用模式 {pattern} 或 {alt_pattern}")
+
                         # 计数文件
                         main_files = list(day_folder.glob(pattern))
                         alt_files = list(day_folder.glob(alt_pattern))
-                        
+
                         if main_files or alt_files:
-                            self.logger.info(f"找到文件: {len(main_files)} (主模式) + {len(alt_files)} (替代模式)")
-                            
+                            self.logger.info(
+                                f"找到文件: {len(main_files)} (主模式) + {len(alt_files)} (替代模式)")
+
                             # 使用找到文件的模式
                             use_pattern = pattern if main_files else alt_pattern
-                            
+
                             self.merge_daily_segments(
                                 day_folder=day_folder,
                                 pattern=use_pattern,
@@ -1115,12 +1128,13 @@ class SeismicDataDownloader:
                             )
                             merged_count += 1
                         else:
-                            self.logger.warning(f"在 {str(day_folder)} 中没有找到匹配的文件")
+                            self.logger.warning(
+                                f"在 {str(day_folder)} 中没有找到匹配的文件")
                     except Exception as e:
                         self.logger.error(f"合并 {day_str} 的数据时出错: {e}")
-                    
+
                     continue
-                
+
                 # 构建匹配模式
                 if input_suffix and "_processed" in input_suffix:
                     # 已经包含了处理后缀
@@ -1134,21 +1148,23 @@ class SeismicDataDownloader:
                     # 无输入后缀，只有处理后缀
                     pattern = f"*_processed.seg*.sac"
                     alt_pattern = f"*_processed.sac"
-                
+
                 # 尝试在处理文件夹中合并
                 try:
-                    self.logger.info(f"在 {str(processed_folder)} 中使用模式 {pattern} 或 {alt_pattern}")
-                    
+                    self.logger.info(
+                        f"在 {str(processed_folder)} 中使用模式 {pattern} 或 {alt_pattern}")
+
                     # 计数文件
                     main_files = list(processed_folder.glob(pattern))
                     alt_files = list(processed_folder.glob(alt_pattern))
-                    
+
                     if main_files or alt_files:
-                        self.logger.info(f"找到文件: {len(main_files)} (主模式) + {len(alt_files)} (替代模式)")
-                        
+                        self.logger.info(
+                            f"找到文件: {len(main_files)} (主模式) + {len(alt_files)} (替代模式)")
+
                         # 使用找到文件的模式
                         use_pattern = pattern if main_files else alt_pattern
-                        
+
                         self.merge_daily_segments(
                             day_folder=processed_folder,
                             pattern=use_pattern,
@@ -1158,10 +1174,11 @@ class SeismicDataDownloader:
                         )
                         merged_count += 1
                     else:
-                        self.logger.warning(f"在 {str(processed_folder)} 中没有找到匹配的文件")
+                        self.logger.warning(
+                            f"在 {str(processed_folder)} 中没有找到匹配的文件")
                 except Exception as e:
                     self.logger.error(f"合并 {day_str} 的数据时出错: {e}")
-            
+
             self.logger.info(f"合并数据段完成, 共处理了 {merged_count} 天的数据")
 
 
