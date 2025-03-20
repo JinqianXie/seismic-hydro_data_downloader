@@ -109,6 +109,8 @@ class DownloadConfig:
         max_workers (int): 并行下载的最大线程数，默认为 5
         retry_delay_base (int): 重试延迟的基数（实际延迟为 base^retry_count），默认为 2
         single_thread (bool): 是否使用单线程模式，默认为 False
+        merge_after_download (bool): 是否在下载后立即合并数据段，默认为 False
+        response_output (str): 去除仪器响应后输出的类型，可选 'VEL'(速度)、'DISP'(位移)或 'ACC'(加速度)，默认为 'VEL'
     """
     network: str
     station: Union[str, List[str]] = "H11??"  # 可以是单个字符串或字符串列表
@@ -120,6 +122,8 @@ class DownloadConfig:
     retry_delay_base: int = 2
     single_thread: bool = False
     need_station_coords: bool = False  # 添加标志，控制是否需要处理台站位置信息
+    merge_after_download: bool = False  # 下载后立即合并数据段
+    response_output: str = 'VEL'  # 去除仪器响应后输出的类型: 'VEL'(速度), 'DISP'(位移), 'ACC'(加速度)
 
 
 @dataclass
@@ -143,9 +147,9 @@ class SeismicDataDownloader:
         初始化下载器
 
         参数:
-            config: 下载配置对象，包含网络、台站等信息
-            save_path: 数据保存的根目录
-            log_file: 日志文件路径，默认为 "data_download.log"
+            config (DownloadConfig): 下载配置对象，包含网络、台站等信息
+            save_path (Path): 数据保存的根目录
+            log_file (Logger): 日志文件路径，默认为 "data_download.log"
         """
         self.config = config
         self.save_path = Path(save_path)
@@ -275,7 +279,21 @@ class SeismicDataDownloader:
         """
         # 如果需要去除仪器响应且有响应数据
         if self.config.data_type != 'raw' and inventory:
-            st.remove_response(inventory=inventory)
+            # 根据配置选择输出类型：速度、位移或加速度
+            if self.config.response_output == 'DISP':
+                output = "DISP"  # 位移
+            elif self.config.response_output == 'VEL':
+                output = "VEL"   # 速度
+            elif self.config.response_output == 'ACC':
+                output = "ACC"   # 加速度
+            else:
+                output = "VEL"   # 默认使用速度
+
+            try:
+                self.logger.info(f"去除仪器响应，输出类型: {output}")
+                st.remove_response(inventory=inventory, output=output)
+            except Exception as e:
+                self.logger.error(f"去除仪器响应失败: {e}")
 
         # 对每个台站创建一个计数器字典，用于跟踪片段
         segment_counters = {}
@@ -408,6 +426,27 @@ class SeismicDataDownloader:
             # 单线程模式：顺序处理每一天
             for day in days:
                 self._fetch_day_data(day)
+
+                # 如果需要在下载后立即合并数据段
+                if self.config.merge_after_download:
+                    day_str = day.strftime("%Y-%m-%d")
+                    day_folder = self.save_path / day_str
+                    self.logger.info(f"下载后立即合并数据: {day_str}")
+
+                    # 先检查文件夹中是否存在文件及其类型
+                    seg_files = list(day_folder.glob("*.seg*.sac"))
+                    regular_files = list(day_folder.glob("*.sac"))
+                    
+                    # 优先使用带seg标记的文件，如果没有就使用普通sac文件
+                    pattern = "*.seg*.sac" if seg_files else "*.sac"
+                    
+                    self.merge_daily_segments(
+                        day_folder=day_folder,
+                        pattern="*.seg*.sac",
+                        merge_folder="merged_raw",
+                        fill_value=0,
+                        merge_method="fill_value"
+                    )
         else:
             # 多线程模式：并行处理多天数据
             with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
@@ -421,6 +460,27 @@ class SeismicDataDownloader:
                     day = future_to_day[future]
                     try:
                         future.result()
+
+                        # 如果需要在下载后立即合并数据段
+                        if self.config.merge_after_download:
+                            day_str = day.strftime("%Y-%m-%d")
+                            day_folder = self.save_path / day_str
+                            self.logger.info(f"下载后立即合并数据: {day_str}")
+
+                            # 先检查文件夹中是否存在文件及其类型
+                            seg_files = list(day_folder.glob("*.seg*.sac"))
+                            regular_files = list(day_folder.glob("*.sac"))
+                            
+                            # 优先使用带seg标记的文件，如果没有就使用普通sac文件
+                            pattern = "*.seg*.sac" if seg_files else "*.sac"
+                            
+                            self.merge_daily_segments(
+                                day_folder=day_folder,
+                                pattern="*.seg*.sac",
+                                merge_folder="merged_raw",
+                                fill_value=0,
+                                merge_method="fill_value"
+                            )
                     except Exception as e:
                         self.logger.error(
                             f"处理 {day.strftime('%Y-%m-%d')} 时发生错误: {e}")
@@ -483,11 +543,16 @@ class SeismicDataDownloader:
             starttime: 起始时间
             endtime: 结束时间
             processed_suffix: 处理后文件的后缀
+            output: 输出类型，可选 'VEL'(速度)、'DISP'(位移)或 'ACC'(加速度)，默认使用配置中的值
         """
         if isinstance(starttime, str):
             starttime = UTCDateTime(starttime)
         if isinstance(endtime, str):
             endtime = UTCDateTime(endtime)
+
+        # 如果未指定输出类型，使用配置中的值
+        if output is None:
+            output = self.config.response_output
 
         days = [starttime + datetime.timedelta(days=i)
                 for i in range(int((endtime - starttime) // 86400 + 1))]
@@ -499,13 +564,20 @@ class SeismicDataDownloader:
             processed_folder = day_folder / "processed"
             processed_folder.mkdir(exist_ok=True)
 
-            # 修改文件匹配模式，支持带有段号(seg*)的文件
-            raw_files = list(day_folder.glob(
-                f"{self.config.network}.*.seg*.sac"))
-            if not raw_files:
-                # 兼容旧文件命名方式
+            # 首先尝试从merged_raw文件夹中获取合并后的数据
+            merged_folder = day_folder / "merged_raw"
+            if merged_folder.exists() and self.config.merge_after_download:
+                raw_files = list(merged_folder.glob(f"{self.config.network}.*.merged.sac"))
+                self.logger.info(f"从合并文件夹 {merged_folder} 中找到 {len(raw_files)} 个文件")
+            else:
+                # 修改文件匹配模式，支持带有段号(seg*)的文件
                 raw_files = list(day_folder.glob(
-                    f"{self.config.network}.*.sac"))
+                    f"{self.config.network}.*.seg*.sac"))
+                if not raw_files:
+                    # 兼容旧文件命名方式
+                    raw_files = list(day_folder.glob(
+                        f"{self.config.network}.*.sac"))
+                self.logger.info(f"从原始文件夹 {day_folder} 中找到 {len(raw_files)} 个文件")
 
             response_file = list(response_folder.glob(
                 f"{self.config.network}_{day_str}_response.xml"))
@@ -597,10 +669,23 @@ class SeismicDataDownloader:
 
         if not all_files:
             self.logger.warning(f"未找到匹配的文件: {pattern} 在 {str(day_folder)}")
-            
-            # 尝试更宽松的匹配
-            self.logger.info("尝试使用更宽松的匹配模式: *.sac")
-            all_files = list(day_folder.glob("*.sac"))
+
+            # 如果是找不到带seg标记的文件，尝试使用不带seg的模式
+            if "seg" in pattern:
+                alternate_pattern = pattern.replace("seg*.", "")
+                self.logger.info(f"尝试使用不带seg的匹配模式: {alternate_pattern}")
+                all_files = list(day_folder.glob(alternate_pattern))
+                if all_files:
+                    self.logger.info(f"使用替代匹配找到 {len(all_files)} 个文件")
+                else:
+                    # 最后尝试最宽松的匹配
+                    self.logger.info("尝试使用最宽松的匹配模式: *.sac")
+                    all_files = list(day_folder.glob("*.sac"))
+            else:
+                # 尝试更宽松的匹配
+                self.logger.info("尝试使用更宽松的匹配模式: *.sac")
+                all_files = list(day_folder.glob("*.sac"))
+                
             if all_files:
                 self.logger.info(f"使用宽松匹配找到 {len(all_files)} 个文件")
             else:
@@ -904,7 +989,8 @@ class SeismicDataDownloader:
                          remove_response: bool = True,
                          merge_segments: bool = False,
                          merge_method: str = "fill_value",
-                         fill_value: float = 0) -> None:
+                         fill_value: float = 0,
+                        response_output: str = None) -> None:
         """
         完整的数据处理流程
 
@@ -927,6 +1013,20 @@ class SeismicDataDownloader:
             for i in range(int((endtime - starttime) // 86400 + 1))
         ]
 
+        # 检查是否已经合并了原始数据
+        raw_merged_exists = False
+        if self.config.merge_after_download:
+            # 检查第一天的merged_raw文件夹是否存在并有合并文件
+            day = days[0]
+            day_str = day.strftime("%Y-%m-%d")
+            merged_raw_folder = self.save_path / day_str / "merged_raw"
+            
+            if merged_raw_folder.exists():
+                merged_files = list(merged_raw_folder.glob("*.merged.sac"))
+                if merged_files:
+                    self.logger.info("检测到原始数据已合并，将使用合并后的数据")
+                    raw_merged_exists = True
+
         # 1. 去除仪器响应（如果需要）
         if remove_response:
             self.remove_response_for_data(
@@ -946,7 +1046,17 @@ class SeismicDataDownloader:
             output_suffix="_processed"
         )
 
-        # 3. 合并数据段（如果需要）
+        # 合并数据部分
+        # 如果原始数据已合并且用户要求合并数据段，则在处理中使用合并数据而不是再次合并
+        if raw_merged_exists and merge_segments:
+            # 设置处理时使用合并数据
+            use_merged = True
+            
+            # 禁用最后的merge_segments步骤，因为我们已经使用了合并的输入
+            merge_segments = False
+            self.logger.info("已使用合并后的原始数据，跳过最终合并步骤")
+
+         # 3. 合并数据段（如果需要）
         if merge_segments:
             self.logger.info("开始合并数据段")
             merged_count = 0
