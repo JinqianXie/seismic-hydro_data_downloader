@@ -109,7 +109,10 @@ class DownloadConfig:
         max_workers (int): 并行下载的最大线程数，默认为 5
         retry_delay_base (int): 重试延迟的基数（实际延迟为 base^retry_count），默认为 2
         single_thread (bool): 是否使用单线程模式，默认为 False
+        need_station_coords (bool): 是否需要处理台站位置信息，默认为 False
         merge_after_download (bool): 是否在下载后立即合并数据段，默认为 False
+        merge_method (str): 合并方法，可选 "fill_value"（填充值）或 "interpolate"（插值），默认为 "fill_value"
+        merge_fill_value (float): 合并时使用的填充值，默认为 0
         response_output (str): 去除仪器响应后输出的类型，可选 'VEL'(速度)、'DISP'(位移)或 'ACC'(加速度)，默认为 'VEL'
     """
     network: str
@@ -123,6 +126,8 @@ class DownloadConfig:
     single_thread: bool = False
     need_station_coords: bool = False  # 添加标志，控制是否需要处理台站位置信息
     merge_after_download: bool = False  # 下载后立即合并数据段
+    merge_method: str = "fill_value"  # 新增参数：合并方法
+    merge_fill_value: float = 0       # 新增参数：填充值
     # 去除仪器响应后输出的类型: 'VEL'(速度), 'DISP'(位移), 'ACC'(加速度)
     response_output: str = 'VEL'
 
@@ -445,8 +450,8 @@ class SeismicDataDownloader:
                         day_folder=day_folder,
                         pattern="*.seg*.sac",
                         merge_folder="merged_raw",
-                        fill_value=0,
-                        merge_method="fill_value"
+                        fill_value=self.config.merge_fill_value,
+                        merge_method=self.config.merge_method
                     )
         else:
             # 多线程模式：并行处理多天数据
@@ -479,8 +484,8 @@ class SeismicDataDownloader:
                                 day_folder=day_folder,
                                 pattern=pattern,
                                 merge_folder="merged_raw",
-                                fill_value=0,
-                                merge_method="fill_value"
+                                fill_value=self.config.merge_fill_value,
+                                merge_method=self.config.merge_method
                             )
                     except Exception as e:
                         self.logger.error(
@@ -1279,7 +1284,11 @@ def main():
         station="H11??",
         channel="EDH",
         max_workers=5,
-        need_station_coords=True  # 启用台站位置信息获取
+        need_station_coords=True,    # 启用台站位置信息获取
+        merge_after_download=True,   # 启用下载后立即合并
+        merge_method="interpolate",  # 使用插值法合并
+        merge_fill_value=0,          # 设置填充值（虽然插值模式不使用）
+        response_output='DISP'       # 设置去除仪器响应后的输出类型为位移
     )
 
     process_config = ProcessingConfig(
