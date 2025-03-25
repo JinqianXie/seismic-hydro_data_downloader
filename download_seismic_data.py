@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import glob
 import numpy as np
+import traceback
 
 
 @dataclass
@@ -113,6 +114,9 @@ class DownloadConfig:
         merge_after_download (bool): 是否在下载后立即合并数据段，默认为 False
         merge_method (str): 合并方法，可选 "fill_value"（填充值）或 "interpolate"（插值），默认为 "fill_value"
         merge_fill_value (float): 合并时使用的填充值，默认为 0
+        merge_max_gap (float): 最大允许的时间间隔（秒），超过此值的间隔将不尝试合并，默认为 None （不限制）
+        force_merge_large_gaps (bool): 是否强制合并大间隔，即使超过 max_gap ，默认为 False
+        merge_preprocessing (bool): 在合并前是否对数据进行预处理（去均值、去趋势），默认为 False
         response_output (str): 去除仪器响应后输出的类型，可选 'VEL'(速度)、'DISP'(位移)或 'ACC'(加速度)，默认为 'VEL'
     """
     network: str
@@ -128,6 +132,9 @@ class DownloadConfig:
     merge_after_download: bool = False  # 下载后立即合并数据段
     merge_method: str = "fill_value"  # 新增参数：合并方法
     merge_fill_value: float = 0       # 新增参数：填充值
+    merge_max_gap: Optional[float] = None  # 最大允许的时间间隔（秒），超过此值的间隔将不尝试合并，默认为None（不限制）
+    force_merge_large_gaps: bool = False   # 是否强制合并大间隔，即使超过max_gap
+    merge_preprocessing: bool = False      # 在合并前是否对数据进行预处理（去均值、去趋势）
     # 去除仪器响应后输出的类型: 'VEL'(速度), 'DISP'(位移), 'ACC'(加速度)
     response_output: str = 'VEL'
 
@@ -448,10 +455,11 @@ class SeismicDataDownloader:
 
                     self.merge_daily_segments(
                         day_folder=day_folder,
-                        pattern="*.seg*.sac",
+                        pattern=pattern,
                         merge_folder="merged_raw",
                         fill_value=self.config.merge_fill_value,
-                        merge_method=self.config.merge_method
+                        merge_method=self.config.merge_method,
+                        max_gap=self.config.merge_max_gap
                     )
         else:
             # 多线程模式：并行处理多天数据
@@ -678,7 +686,8 @@ class SeismicDataDownloader:
 
     def merge_daily_segments(self, day_folder: Path, pattern: str = "*.sac",
                              merge_folder: str = "merged", fill_value=0,
-                             merge_method: str = "fill_value") -> None:
+                             merge_method: str = "fill_value",
+                             max_gap: float = None) -> None:
         """
         合并同一天内的不同数据段为连续的数据流
 
@@ -688,6 +697,7 @@ class SeismicDataDownloader:
             merge_folder: 合并后数据的保存文件夹名称
             fill_value: 填充缺失值使用的值，默认为0
             merge_method: 合并方法，可选 "fill_value"（填充值） 或 "interpolate"（插值）
+            max_gap: 最大允许的时间间隔（秒），超过此值的间隔将不尝试合并，默认为None（不限制）
         """
         merged_folder = day_folder / merge_folder
         merged_folder.mkdir(exist_ok=True)
@@ -780,6 +790,10 @@ class SeismicDataDownloader:
 
         self.logger.info(f"文件分为 {len(file_groups)} 个组")
 
+        # 当使用插值方法时，确保提供更详细的信息
+        if merge_method == "interpolate":
+            self.logger.info(f"使用插值方法进行合并，请注意这可能在大型缺失区域出现问题")
+
         # 对每个组进行处理
         for group_key, file_paths in file_groups.items():
             try:
@@ -816,6 +830,17 @@ class SeismicDataDownloader:
                 if len(stream) == 0:
                     self.logger.warning(f"组 {group_key} 没有成功读取任何数据")
                     continue
+                
+                if self.config.merge_preprocessing:
+                    # 对每个片段进行预处理
+                    for tr in stream:
+                        try:
+                            # 去均值和去趋势，使数据更接近零
+                            tr.detrend('demean')
+                            tr.detrend('linear')
+                            self.logger.debug(f"对片段 {tr.id} 进行了预处理（去均值和去趋势）")
+                        except Exception as e:
+                            self.logger.warning(f"预处理片段 {tr.id} 时出错: {e}")
 
                 # 按通道分组并合并
                 merged_stream = Stream()
@@ -824,6 +849,7 @@ class SeismicDataDownloader:
                 self.logger.info(
                     f"组 {group_key} 包含 {len(channel_ids)} 个不同的通道ID: {channel_ids}")
 
+                # 合并设置，增加对大间隔的处理
                 for channel_id in channel_ids:
                     channel_traces = stream.select(id=channel_id)
 
@@ -831,6 +857,24 @@ class SeismicDataDownloader:
                     channel_traces.sort(keys=['starttime'])
 
                     if len(channel_traces) > 1:
+                        # 检查间隔大小
+                        has_large_gaps = False
+                        if max_gap is not None:
+                            for i in range(len(channel_traces) - 1):
+                                gap = channel_traces[i+1].stats.starttime - \
+                                    channel_traces[i].stats.endtime
+                                if gap > max_gap:
+                                    self.logger.warning(
+                                        f"通道 {channel_id} 存在较大间隔: {gap}秒，超过设定阈值 {max_gap}秒")
+                                    has_large_gaps = True
+
+                        # 如果有大间隔且不强制合并，则跳过
+                        if has_large_gaps and not self.config.force_merge_large_gaps:
+                            self.logger.warning(
+                                f"通道 {channel_id} 因存在较大间隔而跳过合并，可通过设置 force_merge_large_gaps=True 强制合并")
+                            merged_stream += channel_traces
+                            continue
+
                         self.logger.info(
                             f"通道 {channel_id} 有 {len(channel_traces)} 个片段需要合并")
 
@@ -842,11 +886,19 @@ class SeismicDataDownloader:
                         # 合并设置
                         try:
                             if merge_method == "interpolate":
-                                merged_channel = channel_traces.merge(method=1, fill_value=None,
-                                                                      interpolation_samples=-1)
+                                # 增加更详细的插值设置
+                                merged_channel = channel_traces.merge(
+                                    method=1,
+                                    fill_value=None,
+                                    interpolation_samples=-1,  # 使用默认插值点数
+                                    sanity_checks=False  # 对于大间隔，禁用完整性检查
+                                )
                             else:  # 默认使用fill_value
                                 merged_channel = channel_traces.merge(
-                                    method=1, fill_value=fill_value)
+                                    method=1,
+                                    fill_value=fill_value,
+                                    sanity_checks=False  # 对于大间隔，禁用完整性检查
+                                )
 
                             merged_stream += merged_channel
 
@@ -857,6 +909,8 @@ class SeismicDataDownloader:
 
                         except Exception as e:
                             self.logger.error(f"合并通道 {channel_id} 时出错: {e}")
+                            self.logger.error(f"尝试直接添加未合并的片段")
+                            merged_stream += channel_traces
                     else:
                         # 只有一个片段，直接添加
                         self.logger.info(f"通道 {channel_id} 只有一个片段，无需合并")
@@ -877,6 +931,8 @@ class SeismicDataDownloader:
 
             except Exception as e:
                 self.logger.error(f"合并组 {group_key} 时出错: {e}")
+                # 添加异常的详细信息
+                self.logger.error(f"异常详细信息: {traceback.format_exc()}")
 
     def process_data(self,
                      starttime: Union[str, UTCDateTime],
