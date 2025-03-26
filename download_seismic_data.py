@@ -117,6 +117,7 @@ class DownloadConfig:
         merge_max_gap (float): 最大允许的时间间隔（秒），超过此值的间隔将不尝试合并，默认为 None （不限制）
         force_merge_large_gaps (bool): 是否强制合并大间隔，即使超过 max_gap ，默认为 False
         merge_preprocessing (bool): 在合并前是否对数据进行预处理（去均值、去趋势），默认为 False
+        merge_mask_fill_value (float): 掩码数组转换为普通数组时使用的填充值，默认为 0
         response_output (str): 去除仪器响应后输出的类型，可选 'VEL'(速度)、'DISP'(位移)或 'ACC'(加速度)，默认为 'VEL'
     """
     network: str
@@ -132,9 +133,11 @@ class DownloadConfig:
     merge_after_download: bool = False  # 下载后立即合并数据段
     merge_method: str = "fill_value"  # 新增参数：合并方法
     merge_fill_value: float = 0       # 新增参数：填充值
-    merge_max_gap: Optional[float] = None  # 最大允许的时间间隔（秒），超过此值的间隔将不尝试合并，默认为None（不限制）
+    # 最大允许的时间间隔（秒），超过此值的间隔将不尝试合并，默认为None（不限制）
+    merge_max_gap: Optional[float] = None
     force_merge_large_gaps: bool = False   # 是否强制合并大间隔，即使超过max_gap
     merge_preprocessing: bool = False      # 在合并前是否对数据进行预处理（去均值、去趋势）
+    merge_mask_fill_value: float = 0  # 掩码数组转换为普通数组时使用的填充值
     # 去除仪器响应后输出的类型: 'VEL'(速度), 'DISP'(位移), 'ACC'(加速度)
     response_output: str = 'VEL'
 
@@ -830,7 +833,7 @@ class SeismicDataDownloader:
                 if len(stream) == 0:
                     self.logger.warning(f"组 {group_key} 没有成功读取任何数据")
                     continue
-                
+
                 if self.config.merge_preprocessing:
                     # 对每个片段进行预处理
                     for tr in stream:
@@ -891,13 +894,13 @@ class SeismicDataDownloader:
                                     method=1,
                                     fill_value=None,
                                     interpolation_samples=-1,  # 使用默认插值点数
-                                    sanity_checks=False  # 对于大间隔，禁用完整性检查
+                                    # sanity_checks=False  # 对于大间隔，禁用完整性检查
                                 )
                             else:  # 默认使用fill_value
                                 merged_channel = channel_traces.merge(
                                     method=1,
                                     fill_value=fill_value,
-                                    sanity_checks=False  # 对于大间隔，禁用完整性检查
+                                    # sanity_checks=False  # 对于大间隔，禁用完整性检查
                                 )
 
                             merged_stream += merged_channel
@@ -909,8 +912,18 @@ class SeismicDataDownloader:
 
                         except Exception as e:
                             self.logger.error(f"合并通道 {channel_id} 时出错: {e}")
-                            self.logger.error(f"尝试直接添加未合并的片段")
-                            merged_stream += channel_traces
+                            self.logger.error(f"尝试使用备用方法合并")
+
+                            # 尝试备用合并方法
+                            try:
+                                # 最简单的merge调用，减少参数
+                                merged_channel = channel_traces.merge()
+                                merged_stream += merged_channel
+                                self.logger.info(f"备用合并方法成功")
+                            except Exception as e2:
+                                self.logger.error(f"备用合并方法也失败: {e2}")
+                                self.logger.error(f"添加未合并的片段")
+                                merged_stream += channel_traces
                     else:
                         # 只有一个片段，直接添加
                         self.logger.info(f"通道 {channel_id} 只有一个片段，无需合并")
@@ -923,6 +936,23 @@ class SeismicDataDownloader:
                 # 保存合并后的数据
                 output_file = merged_folder / f"{group_key}.merged.sac"
 
+                for tr in merged_stream:
+                    # 检查数据是否是掩码数组
+                    if hasattr(tr.data, 'mask'):
+                        # 如果是掩码数组，将其转换为普通数组
+                        self.logger.info(f"检测到掩码数组，转换为普通数组")
+                        import numpy as np
+                        # 用指定的fill_value填充掩码值
+                        if merge_method == "interpolate":
+                            # 对于插值方法，尝试将掩码值填充为前后点的平均值或0
+                            tr.data = np.ma.filled(tr.data, fill_value=getattr(
+                                self.config, 'merge_mask_fill_value', fill_value))
+                        else:
+                            # 对于fill_value方法，使用指定的填充值
+                            tr.data = np.ma.filled(
+                                tr.data, fill_value=fill_value)
+
+                # 写入文件
                 try:
                     merged_stream.write(str(output_file), format="SAC")
                     self.logger.info(f"成功合并并保存: {output_file}")
@@ -933,6 +963,23 @@ class SeismicDataDownloader:
                 self.logger.error(f"合并组 {group_key} 时出错: {e}")
                 # 添加异常的详细信息
                 self.logger.error(f"异常详细信息: {traceback.format_exc()}")
+
+                # 尝试单独保存每个轨迹
+                self.logger.info(f"尝试单独保存每个轨迹")
+                for i, tr in enumerate(merged_stream):
+                    try:
+                        # 确保数据不是掩码数组
+                        if hasattr(tr.data, 'mask'):
+                            tr.data = np.ma.filled(
+                                tr.data, fill_value=fill_value)
+
+                        # 构建单独的文件名
+                        individual_file = merged_folder / \
+                            f"{group_key}.part{i}.sac"
+                        tr.write(str(individual_file), format="SAC")
+                        self.logger.info(f"成功保存单独轨迹: {individual_file}")
+                    except Exception as e_inner:
+                        self.logger.error(f"保存单独轨迹时出错: {e_inner}")
 
     def process_data(self,
                      starttime: Union[str, UTCDateTime],
