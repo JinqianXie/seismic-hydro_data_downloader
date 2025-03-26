@@ -647,8 +647,15 @@ class SeismicDataDownloader:
                     segment_part = ".merged"
 
                 # 构建新的文件名，包含输出类型信息
-                processed_file = processed_folder / \
-                    f"{station_part}{segment_part}{processed_suffix}_{output.lower()}.sac"
+                # 检查processed_suffix是否已经包含输出类型
+                if output and output.lower() in processed_suffix.lower():
+                    # 如果后缀已包含输出类型，就不再添加
+                    processed_file = processed_folder / \
+                        f"{station_part}{segment_part}{processed_suffix}.sac"
+                else:
+                    # 否则，按原来的方式添加输出类型
+                    processed_file = processed_folder / \
+                        f"{station_part}{segment_part}{processed_suffix}_{output.lower()}.sac"
 
                 for retry in range(self.config.max_retries):
                     try:
@@ -1028,6 +1035,9 @@ class SeismicDataDownloader:
 
         def process_single_day(day: datetime.datetime) -> None:
             """处理单天数据"""
+
+            nonlocal use_merged  # 声明这个变量来自外部作用域
+
             day_str = day.strftime("%Y-%m-%d")
             day_folder = self.save_path / day_str
             processed_folder = day_folder / "processed"
@@ -1159,7 +1169,8 @@ class SeismicDataDownloader:
                          merge_segments: bool = False,
                          merge_method: str = "fill_value",
                          fill_value: float = 0,
-                         response_output: str = None) -> None:
+                         response_output: str = None,
+                         use_merged: bool = False) -> None:
         """
         完整的数据处理流程
 
@@ -1170,6 +1181,8 @@ class SeismicDataDownloader:
             merge_segments: 是否合并数据段
             merge_method: 合并方法，"fill_value" 或 "interpolate"
             fill_value: 填充值，用于 fill_value 方法
+            response_output: 去除仪器响应后输出的类型，可选 'VEL'(速度)、'DISP'(位移)或 'ACC'(加速度)，默认为 'NONE'
+            use_merged: 是否使用已经合并过的数据，默认 False
         """
         # 转换时间格式
         if isinstance(starttime, str):
@@ -1208,23 +1221,24 @@ class SeismicDataDownloader:
             # 如果有合并数据且配置为使用合并数据，则从合并数据中去除响应
             if raw_merged_exists and self.config.merge_after_download:
                 self.logger.info("从合并后的原始数据中去除仪器响应")
-
+                use_merged = True
                 self.remove_response_for_data(
                     starttime=starttime,
                     endtime=endtime,
                     processed_suffix=processed_suffix,
                     output=output_type,
-                    use_merged=True
+                    use_merged=use_merged
                 )
             else:
                 # 从原始分段数据中去除响应
                 self.logger.info("从原始分段数据中去除仪器响应")
+                use_merged = False
                 self.remove_response_for_data(
                     starttime=starttime,
                     endtime=endtime,
                     processed_suffix=processed_suffix,
                     output=output_type,
-                    use_merged=False
+                    use_merged=use_merged
                 )
 
             input_suffix = processed_suffix
